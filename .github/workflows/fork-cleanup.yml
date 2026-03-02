@@ -1,0 +1,73 @@
+name: Fork Branch Cleanup
+
+on:
+  pull_request_target:
+    types: [closed]
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+    
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Check GH_PAT secret
+        id: check_secret
+        run: |
+          if [ -z "$GH_PAT" ]; then
+            echo "WARNING: GH_PAT secret is not set or is empty!"
+            echo "The workflow cannot clean up fork branches without GH_PAT."
+            echo "secret_set=false" >> $GITHUB_OUTPUT
+          else
+            echo "GH_PAT secret is set (length: ${#GH_PAT})"
+            echo "secret_set=true" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+
+      - name: Verify authentication
+        if: steps.check_secret.outputs.secret_set == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh auth status
+
+      - name: Cleanup fork branch after PR merge
+        if: steps.check_secret.outputs.secret_set == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          FORK_REPO="cloudwaddie-agent/${{ github.event.repository.name }}"
+          HEAD_REPO="${{ github.event.pull_request.head.repo.full_name }}"
+          
+          echo "=== Fork Cleanup Debug Info ==="
+          echo "Branch name: $BRANCH_NAME"
+          echo "Fork repo: $FORK_REPO"
+          echo "Head repo: $HEAD_REPO"
+          echo "================================"
+          
+          if [[ "$HEAD_REPO" == "$FORK_REPO" ]]; then
+            echo "Cleaning up fork branch: $BRANCH_NAME"
+            
+            set +e
+            RESPONSE=$(gh api "repos/$FORK_REPO/git/refs/heads/$BRANCH_NAME" -X DELETE 2>&1)
+            EXIT_CODE=$?
+            set -e
+            
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "Successfully deleted branch: $BRANCH_NAME"
+            elif echo "$RESPONSE" | grep -q "Not Found" || echo "$RESPONSE" | grep -q "404"; then
+              echo "Branch already deleted or does not exist (404)"
+            else
+              echo "Failed to delete branch. Exit code: $EXIT_CODE"
+              echo "Error: $RESPONSE"
+            fi
+            
+            echo "Cleanup complete for branch: $BRANCH_NAME"
+          else
+            echo "Skipping cleanup - PR was not from fork ($HEAD_REPO != $FORK_REPO)"
+          fi

@@ -1,0 +1,179 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  schedule:
+    - cron: '0 0 * * 0'
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  format-check:
+    name: Code Formatting
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install formatting tools
+        run: |
+          pip install black isort ruff
+
+      - name: Check Black formatting
+        id: black
+        run: |
+          echo "=== Black Format Check ==="
+          black --check --diff src/ tests/ 2>&1 | tee black_output.txt || true
+          if grep -q "would reformat" black_output.txt; then
+            echo "needs_formatting=true" >> $GITHUB_OUTPUT
+            echo "❌ Code needs formatting"
+          else
+            echo "needs_formatting=false" >> $GITHUB_OUTPUT
+            echo "✅ Code is properly formatted"
+          fi
+        continue-on-error: true
+
+      - name: Check import order
+        id: isort
+        run: |
+          echo "=== isort Import Check ==="
+          isort --check-only --diff src/ tests/ 2>&1 | tee isort_output.txt || true
+          if grep -q "ERROR" isort_output.txt; then
+            echo "needs_sorting=true" >> $GITHUB_OUTPUT
+            echo "❌ Imports need sorting"
+          else
+            echo "needs_sorting=false" >> $GITHUB_OUTPUT
+            echo "✅ Imports are sorted correctly"
+          fi
+        continue-on-error: true
+
+  complexity-analysis:
+    name: Code Complexity Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install analysis tools
+        run: |
+          pip install radon xenon
+
+      - name: Analyze code complexity
+        run: |
+          echo "=== Cyclomatic Complexity Analysis ==="
+          radon cc src/ -a -nc || true
+          
+          echo ""
+          echo "=== Maintainability Index ==="
+          radon mi src/ || true
+        continue-on-error: true
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install security tools
+        run: |
+          pip install bandit safety semgrep
+
+      - name: Run Bandit security scan
+        run: |
+          echo "=== Bandit Security Scan ==="
+          bandit -r src/ -ll || true
+        continue-on-error: true
+
+  dead-code-detection:
+    name: Dead Code Detection
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install vulture
+        run: |
+          pip install vulture
+
+      - name: Detect dead code
+        run: |
+          echo "=== Dead Code Detection ==="
+          vulture src/ --min-confidence 80 --sort-by-size 2>&1 | tee dead_code.txt || true
+        continue-on-error: true
+
+  documentation-check:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check README updates
+        run: |
+          echo "=== README Check ==="
+          if [ -f README.md ]; then
+            readme_lines=$(wc -l < README.md)
+            echo "README.md has $readme_lines lines"
+            
+            if [ $readme_lines -lt 20 ]; then
+              echo "⚠️ README.md seems short. Consider adding more documentation."
+            fi
+          else
+            echo "❌ README.md not found"
+          fi
+
+  metrics:
+    name: Code Metrics
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate metrics
+        run: |
+          echo "=== Code Metrics ==="
+          
+          py_lines=$(find src -name "*.py" -type f -exec wc -l {} + | tail -1 | awk '{print $1}')
+          test_lines=$(find tests -name "*.py" -type f -exec wc -l {} + 2>/dev/null | tail -1 | awk '{print $1}')
+          
+          echo "Python source lines: $py_lines"
+          echo "Test lines: $test_lines"
+          
+          py_files=$(find src -name "*.py" -type f | wc -l)
+          test_files=$(find tests -name "*.py" -type f 2>/dev/null | wc -l)
+          
+          echo "Python files: $py_files"
+          echo "Test files: $test_files"

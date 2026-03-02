@@ -1,0 +1,392 @@
+name: CloudWaddie Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "Custom prompt"
+        required: false
+  issue_comment:
+    types: [created]
+  issues:
+    types: [opened, edited]
+  pull_request:
+    types: [opened, edited]
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       contains(github.event.comment.body || '', '@cloudwaddie-agent') &&
+       (github.event.comment.user.login || '') != 'cloudwaddie-agent' &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"]'), github.event.comment.author_association || '')) ||
+      (github.event_name == 'issues' &&
+       contains(github.event.issue.body || '', '@cloudwaddie-agent') &&
+       (github.event.issue.user.login || '') != 'cloudwaddie-agent' &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"]'), github.event.issue.author_association || '')) ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.body || '', '@cloudwaddie-agent') &&
+       (github.event.pull_request.user.login || '') != 'cloudwaddie-agent' &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"]'), github.event.pull_request.author_association || ''))
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+
+      - name: Sync workflow from actions-agent
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [[ "${{ github.repository }}" == "CloudWaddie/actions-agent" ]]; then
+            echo "Source repo — skipping sync"
+            exit 0
+          fi
+
+          curl -sSfL \
+            "https://raw.githubusercontent.com/CloudWaddie/actions-agent/main/.github/workflows/cloudwaddie-agent.yml" \
+            -o /tmp/cloudwaddie-agent.yml
+
+          if diff -q .github/workflows/cloudwaddie-agent.yml /tmp/cloudwaddie-agent.yml > /dev/null 2>&1; then
+            echo "Workflow is up to date"
+            exit 0
+          fi
+
+          echo "Workflow is outdated — creating sync PR"
+          BRANCH="auto/sync-agent-workflow"
+          REPO="${{ github.repository }}"
+
+          git config user.name "cloudwaddie-agent"
+          git config user.email "cloudwaddie-agent@users.noreply.github.com"
+
+          gh repo fork "$REPO" --remote=false 2>/dev/null || true
+          FORK="cloudwaddie-agent/$(basename "$REPO")"
+
+          existing_pr=$(gh pr list --repo "$REPO" --head "cloudwaddie-agent:$BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$existing_pr" ]; then
+            gh pr close "$existing_pr" --repo "$REPO" --delete-branch || true
+          fi
+
+          git checkout -B "$BRANCH"
+          cp /tmp/cloudwaddie-agent.yml .github/workflows/cloudwaddie-agent.yml
+          git add .github/workflows/cloudwaddie-agent.yml
+          git commit -m "chore: sync cloudwaddie-agent.yml from actions-agent"
+          git push -f "https://github.com/$FORK.git" "$BRANCH"
+
+          gh pr create \
+            --repo "$REPO" \
+            --head "cloudwaddie-agent:$BRANCH" \
+            --title "chore: sync cloudwaddie-agent.yml from actions-agent" \
+            --body "Automated sync of \`cloudwaddie-agent.yml\` from [CloudWaddie/actions-agent](https://github.com/CloudWaddie/actions-agent)."
+
+          git checkout -
+
+      - name: Configure Git as cloudwaddie-agent
+        run: |
+          git config user.name "cloudwaddie-agent"
+          git config user.email "cloudwaddie-agent@users.noreply.github.com"
+
+      - name: Authenticate gh CLI as cloudwaddie-agent
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh auth status || echo "Using GH_TOKEN environment variable for authentication"
+
+      - name: Ensure tmux is available (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          if ! command -v tmux >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends tmux
+          fi
+          tmux -V
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Checkout oh-my-opencode dev branch
+        uses: actions/checkout@v6
+        with:
+          repository: code-yeongyu/oh-my-opencode
+          ref: dev
+          path: oh-my-opencode
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.bun/install/cache
+            oh-my-opencode/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('oh-my-opencode/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Get OpenCode latest version
+        id: opencode-version
+        run: |
+          VERSION=$(npm view opencode-ai version 2>/dev/null)
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ -z "$VERSION" ]]; then
+            echo "VERSION environment variable is invalid or empty."
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Cache OpenCode CLI
+        uses: actions/cache@v5
+        with:
+          path: ~/.opencode
+          key: ${{ runner.os }}-opencode-${{ steps.opencode-version.outputs.version }}
+          restore-keys: |
+            ${{ runner.os }}-opencode-
+
+      - name: Cache oh-my-opencode dist
+        uses: actions/cache@v5
+        with:
+          path: oh-my-opencode/dist
+          key: ${{ runner.os }}-omo-dist-${{ hashFiles('oh-my-opencode/src/**/*.ts', 'oh-my-opencode/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-omo-dist-
+
+      - name: Build oh-my-opencode
+        working-directory: oh-my-opencode
+        run: |
+          bun install
+          if [ -d "dist" ] && [ "$(ls -A dist)" ]; then
+            echo "Using cached dist folder"
+          else
+            bun run build
+          fi
+
+      - name: Setup OpenCode with oh-my-opencode
+        env:
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+        run: |
+          export PATH="$HOME/.opencode/bin:$PATH"
+
+          if ! command -v opencode &>/dev/null; then
+            echo "Installing OpenCode..."
+            curl -fsSL https://opencode.ai/install -o /tmp/opencode-install.sh
+            if file /tmp/opencode-install.sh | grep -q "shell script\|text"; then
+              if ! bash /tmp/opencode-install.sh 2>&1; then
+                echo "Default installer failed, trying direct install..."
+                bash <(curl -fsSL https://opencode.ai/install)
+              fi
+            else
+              echo "Download corrupted, trying direct install..."
+              bash <(curl -fsSL https://opencode.ai/install)
+            fi
+          fi
+          opencode --version
+
+          CLAUDE_FLAG="--claude=no"
+          OPENAI_FLAG="--openai=no"
+          GEMINI_FLAG="--gemini=no"
+          COPILOT_FLAG="--copilot=no"
+
+          if [[ -n "$OPENCODE_AUTH_JSON" ]]; then
+            mkdir -p ~/.local/share/opencode
+            echo "$OPENCODE_AUTH_JSON" > ~/.local/share/opencode/auth.json
+            chmod 600 ~/.local/share/opencode/auth.json
+
+            rm -rf ~/.cache/oh-my-opencode/connected-providers.json ~/.cache/oh-my-opencode/provider-models.json 2>/dev/null || true
+
+            if echo "$OPENCODE_AUTH_JSON" | jq -e '.anthropic' > /dev/null 2>&1; then
+              CLAUDE_FLAG="--claude=yes"
+            fi
+            if echo "$OPENCODE_AUTH_JSON" | jq -e '.openai' > /dev/null 2>&1; then
+              OPENAI_FLAG="--openai=yes"
+            fi
+            if echo "$OPENCODE_AUTH_JSON" | jq -e '.google' > /dev/null 2>&1; then
+              GEMINI_FLAG="--gemini=yes"
+            fi
+            COPILOT_FLAG="--copilot=yes"
+          fi
+
+          bun run oh-my-opencode/dist/cli/index.js install --no-tui $CLAUDE_FLAG $OPENAI_FLAG $GEMINI_FLAG $COPILOT_FLAG
+
+          OPENCODE_JSON=~/.config/opencode/opencode.json
+          REPO_PATH=$(pwd)/oh-my-opencode
+          jq --arg path "file://$REPO_PATH/src/index.ts" '
+            .plugin = [.plugin[] | select(. != "oh-my-opencode")] + [$path]
+          ' "$OPENCODE_JSON" > /tmp/oc.json && mv /tmp/oc.json "$OPENCODE_JSON"
+
+          if [[ -z "$OPENCODE_AUTH_JSON" ]]; then
+            echo "No auth provided - using free OpenCode models"
+            jq '.model = "opencode/minimax-m2.5-free"' "$OPENCODE_JSON" > /tmp/oc.json && mv /tmp/oc.json "$OPENCODE_JSON"
+          fi
+
+      - name: Collect Context
+        id: context
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENT_ID_VAL: ${{ github.event.comment.id }}
+        run: |
+          if [[ "$EVENT_NAME" == "issue_comment" ]]; then
+            ISSUE_NUM="${{ github.event.issue.number }}"
+            AUTHOR="$COMMENT_AUTHOR"
+            COMMENT_ID="$COMMENT_ID_VAL"
+            USER_COMMENT="$COMMENT_BODY"
+            
+            ISSUE_DATA=$(gh api "repos/$REPO/issues/${ISSUE_NUM}")
+            TITLE=$(echo "$ISSUE_DATA" | jq -r '.title')
+            
+            if echo "$ISSUE_DATA" | jq -e '.pull_request' > /dev/null; then
+              echo "type=pr" >> $GITHUB_OUTPUT
+            else
+              echo "type=issue" >> $GITHUB_OUTPUT
+            fi
+            echo "number=${ISSUE_NUM}" >> $GITHUB_OUTPUT
+            echo "title=${TITLE}" >> $GITHUB_OUTPUT
+            echo "comment<<EOF" >> $GITHUB_OUTPUT
+            echo "$USER_COMMENT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "author=$AUTHOR" >> $GITHUB_OUTPUT
+            echo "comment_id=$COMMENT_ID" >> $GITHUB_OUTPUT
+            
+          elif [[ "$EVENT_NAME" == "issues" ]]; then
+            ISSUE_NUM="${{ github.event.issue.number }}"
+            AUTHOR="${{ github.event.issue.user.login }}"
+            TITLE="${{ github.event.issue.title }}"
+            
+            USER_COMMENT=$(gh api "repos/$REPO/issues/${ISSUE_NUM}" --jq '.body // ""')
+            
+            echo "type=issue" >> $GITHUB_OUTPUT
+            echo "number=${ISSUE_NUM}" >> $GITHUB_OUTPUT
+            echo "title=${TITLE}" >> $GITHUB_OUTPUT
+            echo "comment<<EOF" >> $GITHUB_OUTPUT
+            echo "$USER_COMMENT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "author=$AUTHOR" >> $GITHUB_OUTPUT
+            echo "comment_id=" >> $GITHUB_OUTPUT
+            
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+            PR_NUM="${{ github.event.pull_request.number }}"
+            AUTHOR="${{ github.event.pull_request.user.login }}"
+            TITLE="${{ github.event.pull_request.title }}"
+            
+            USER_COMMENT=$(gh api "repos/$REPO/pulls/${PR_NUM}" --jq '.body // ""')
+            
+            echo "type=pr" >> $GITHUB_OUTPUT
+            echo "number=${PR_NUM}" >> $GITHUB_OUTPUT
+            echo "title=${TITLE}" >> $GITHUB_OUTPUT
+            echo "comment<<EOF" >> $GITHUB_OUTPUT
+            echo "$USER_COMMENT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "author=$AUTHOR" >> $GITHUB_OUTPUT
+            echo "comment_id=" >> $GITHUB_OUTPUT
+            
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "type=dispatch" >> $GITHUB_OUTPUT
+            echo "number=" >> $GITHUB_OUTPUT
+            echo "title=Manual Workflow Run" >> $GITHUB_OUTPUT
+            echo "author=${{ github.actor }}" >> $GITHUB_OUTPUT
+            echo "comment_id=" >> $GITHUB_OUTPUT
+            echo "comment<<EOF" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Add eyes reaction
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [[ -n "${{ steps.context.outputs.comment_id }}" ]]; then
+            gh api "/repos/${{ github.repository }}/issues/comments/${{ steps.context.outputs.comment_id }}/reactions" \
+              -X POST -f content="eyes" || true
+          elif [[ -n "${{ steps.context.outputs.number }}" ]]; then
+            gh api "/repos/${{ github.repository }}/issues/${{ steps.context.outputs.number }}/reactions" \
+              -X POST -f content="eyes" || true
+          fi
+
+      - name: Run oh-my-opencode
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          USER_COMMENT: ${{ steps.context.outputs.comment }}
+          COMMENT_AUTHOR: ${{ steps.context.outputs.author }}
+          CONTEXT_TYPE: ${{ steps.context.outputs.type }}
+          CONTEXT_NUMBER: ${{ steps.context.outputs.number }}
+          CONTEXT_TITLE: ${{ steps.context.outputs.title }}
+          REPO_NAME: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          export PATH="$HOME/.opencode/bin:$PATH"
+
+          PROMPT=$(cat <<'PROMPT_EOF'
+          [analyze-mode]
+          ANALYSIS MODE. Gather context before diving deep:
+
+          Your username is @cloudwaddie-agent, mentioned by @AUTHOR in REPO.
+
+          ## Context
+          - Title: TITLE
+          - Type: TYPE
+          - Number: #NUMBER
+          - Repository: REPO
+          - Default Branch: BRANCH
+
+          ## IMPORTANT: Directory Awareness
+          - The `oh-my-opencode/` directory is part of the agent itself, NOT the project being worked on
+          - When exploring or modifying the project, IGNORE the `oh-my-opencode/` directory
+          - Focus only on the actual project files
+
+          ## User's Request
+          COMMENT
+
+          ---
+
+          ## CRITICAL: First Steps
+
+          ### [CODE RED] MANDATORY OUTPUT REQUIREMENT
+          **YOU MUST POST AT LEAST ONE COMMENT. SILENT COMPLETION = FAILURE.**
+
+          ### [CODE RED] MANDATORY CONTEXT READING - ZERO EXCEPTIONS
+          **YOU MUST READ FULL CONVERSATION HISTORY. NO SHORTCUTS.**
+
+          For Issues - Run: gh issue view NUMBER --comments
+          For PRs - Run: gh pr view NUMBER --comments
+
+          ## Workflow
+          1. READ full conversation
+          2. CREATE TODOS to plan all work
+          3. INVESTIGATE and satisfy the request
+          4. IF implementation requested: Make changes and create PR
+          5. ALWAYS COMMENT: Report results
+          PROMPT_EOF
+          )
+
+          PROMPT="${PROMPT//AUTHOR/$COMMENT_AUTHOR}"
+          PROMPT="${PROMPT//REPO/$REPO_NAME}"
+          PROMPT="${PROMPT//TYPE/$CONTEXT_TYPE}"
+          PROMPT="${PROMPT//NUMBER/$CONTEXT_NUMBER}"
+          PROMPT="${PROMPT//TITLE/$CONTEXT_TITLE}"
+          PROMPT="${PROMPT//BRANCH/$DEFAULT_BRANCH}"
+          PROMPT="${PROMPT//COMMENT/$USER_COMMENT}"
+          
+          stdbuf -oL -eL bun run oh-my-opencode/dist/cli/index.js run "$PROMPT"
+
+      - name: Update reaction
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [[ -n "${{ steps.context.outputs.comment_id }}" ]]; then
+            gh api "/repos/${{ github.repository }}/issues/comments/${{ steps.context.outputs.comment_id }}/reactions" \
+              -X POST -f content="+1" || true
+          fi

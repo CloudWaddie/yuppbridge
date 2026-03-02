@@ -1,0 +1,128 @@
+# YuppBridge
+
+OpenAI-compatible API bridge to Yupp AI (yupp.ai).
+
+### Thank you to the [AI Leaks server](https://discord.gg/fqmaHkQpJZ) for being a partner!
+
+![AI-Leaks-Logo](https://github.com/user-attachments/assets/5fd3d456-152c-44e2-acee-f4c2a1ca2caa)
+
+## Sister Projects
+
+- **[LM Arena Bridge](https://github.com/cloudwaddie/lmarenabridge)** - OpenAI-compatible API bridge to LM Arena
+
+## Description
+
+YuppBridge provides an OpenAI-compatible API endpoint that interacts with models on Yupp AI. It uses cloudscraper for stealthy requests and supports streaming responses.
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.10+
+- cloudscraper
+
+### Installation
+
+```bash
+pip install -r requirements.txt
+pip install -e .
+```
+
+### 1. Get your Authentication Token
+
+To use YuppBridge, you need to get your session token from the Yupp AI website.
+
+1. Open your web browser and go to [yupp.ai](https://yupp.ai).
+2. Log in to your account (or use the website without login for limited access).
+3. Send a message in the chat (this generates the session token).
+4. Open the developer tools in your browser (F12).
+5. Go to the "Application" or "Storage" tab.
+6. In the "Cookies" section, find the cookies for the yupp.ai domain.
+7. Look for a cookie named `__Secure-yupp.session-token` and copy its value.
+
+### 2. Configure the Application
+
+Create a `config.json` file:
+
+```json
+{
+    "auth_tokens": ["your_yupp_session_token_here"],
+    "api_keys": [
+        {"name": "default", "key": "sk-your-api-key", "rpm": 60}
+    ],
+    "password": "admin",
+    "proxy": null,
+    "max_error_count": 3,
+    "error_cooldown": 300
+}
+```
+
+Or set environment variable:
+```bash
+export YUPP_API_KEY="your_yupp_session_token"
+```
+
+### 3. Run the Application
+
+```bash
+python -m uvicorn src.main:app --host 0.0.0.0 --port 8000
+
+# Or directly
+python src/main.py
+```
+
+The application will start a server on `localhost:8000`.
+
+## Usage
+
+### Chat Completions
+
+```bash
+curl -X POST http://localhost:8000/api/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": false
+  }'
+```
+
+### Streaming
+
+```bash
+curl -X POST http://localhost:8000/api/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
+  }'
+```
+
+## API Endpoints
+
+- `POST /api/v1/chat/completions` — OpenAI-compatible chat completions
+- `GET /v1/models` — List available models
+- `GET /health` — Health check
+- `GET /dashboard` — Admin dashboard
+- `POST /api/v1/config/reload` — Reload configuration
+
+## Environment Variables
+
+- `YUPP_API_KEY` — Comma-separated auth tokens
+- `YUPP_TOKENS` — Alternative to YUPP_API_KEY
+- `MAX_ERROR_COUNT` — Max errors before account disabled (default: 3)
+- `ERROR_COOLDOWN` — Seconds before retry (default: 300)
+- `DEBUG_MODE` — Enable debug logging
+
+## Testing
+
+```bash
+python -m pytest tests/
+```
+
+## Architecture
+
+See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
