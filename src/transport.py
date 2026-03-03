@@ -17,6 +17,17 @@ import httpx
 from . import auth, constants, state, token_extractor as tex
 
 _executor = ThreadPoolExecutor(max_workers=32)
+_executor_shutdown = False
+
+
+def cleanup_executor() -> None:
+    """Clean up the ThreadPoolExecutor on shutdown."""
+    global _executor_shutdown
+    if not _executor_shutdown:
+        _executor.shutdown(wait=True)
+        _executor_shutdown = True
+        import logging
+        logging.getLogger("yuppbridge").info("ThreadPoolExecutor shut down")
 
 
 def log_debug(message: str) -> None:

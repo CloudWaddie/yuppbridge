@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from . import config, constants, state
 
 
-def load_yupp_accounts(tokens_str: Optional[str] = None) -> None:
+async def load_yupp_accounts(tokens_str: Optional[str] = None) -> None:
     """
     Load Yupp accounts from token string or config.
     
