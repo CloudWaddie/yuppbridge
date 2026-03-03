@@ -42,6 +42,9 @@ TOKEN_PATTERNS = [
     r'["\']?existing["\']?\s*[:=]\s*["\']?([a-f0-9]{40,42})',
 ]
 
+# Model settings
+DEFAULT_MODEL_CREATED_TIMESTAMP = 1700000000  # Fallback timestamp for models
+
 # Request settings
 DEFAULT_TIMEOUT = 120
 STREAM_TIMEOUT = 300
