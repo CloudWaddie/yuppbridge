@@ -2,19 +2,30 @@
 YuppBridge - OpenAI-compatible API bridge to Yupp AI (yupp.ai)
 """
 
-from . import auth, config, constants, state, token_extractor, transport
-from .main import app, get_config, save_config
+# Import submodules
+from . import auth, config, constants, state, token_extractor, transport, exceptions
 
-__version__ = "0.1.0"
+# Import app lazily to avoid circular imports
+def __getattr__(name):
+    if name == "app":
+        from .main import app
+        return app
+    if name == "get_config":
+        from .main import get_config
+        return get_config
+    if name == "save_config":
+        from .main import save_config
+        return save_config
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+__version__ = "0.2.0"
 
 __all__ = [
-    "app",
     "auth",
     "config", 
     "constants",
     "state",
     "token_extractor",
     "transport",
-    "get_config",
-    "save_config",
+    "exceptions",
 ]
