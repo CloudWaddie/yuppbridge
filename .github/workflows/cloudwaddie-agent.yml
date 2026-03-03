@@ -71,23 +71,28 @@ jobs:
           BRANCH="auto/sync-agent-workflow"
           REPO="${{ github.repository }}"
 
+          existing_pr=$(gh pr list --repo "$REPO" --head "cloudwaddie-agent:$BRANCH" --json number,state --jq '.[0]' 2>/dev/null || true)
+          if [ -n "$existing_pr" ]; then
+            PR_STATE=$(echo "$existing_pr" | jq -r '.state')
+            if [ "$PR_STATE" == "OPEN" ]; then
+              echo "Sync PR already exists and is open — skipping"
+              exit 0
+            fi
+            gh pr close "$existing_pr" --repo "$REPO" --delete-branch || true
+          fi
+
           git config user.name "cloudwaddie-agent"
           git config user.email "cloudwaddie-agent@users.noreply.github.com"
 
           # Fork the repo (idempotent — no-op if already forked)
           gh repo fork "$REPO" --remote=false 2>/dev/null || true
-          FORK="cloudwaddie-agent/$(basename "$REPO")"
 
-          # Close existing sync PR if any
-          existing_pr=$(gh pr list --repo "$REPO" --head "cloudwaddie-agent:$BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
-          if [ -n "$existing_pr" ]; then
-            gh pr close "$existing_pr" --repo "$REPO" --delete-branch || true
-          fi
-
+          # Get the authenticated user's login (the one who will have the fork)
+          FORK=$(gh api user --jq '.login')
           git checkout -B "$BRANCH"
           cp /tmp/cloudwaddie-agent.yml .github/workflows/cloudwaddie-agent.yml
           git add .github/workflows/cloudwaddie-agent.yml
-          git commit -m "chore: sync cloudwaddie-agent.yml from actions-agent"
+          git commit -m "chore: sync cloudwaddie-agent.yml from actions-agent" -m "Co-authored-by: CloudWaddie <CloudWaddie@users.noreply.github.com>"
           git push -f "https://github.com/$FORK.git" "$BRANCH"
 
           gh pr create \
@@ -386,6 +391,7 @@ jobs:
           ### Git Config
           - user.name: cloudwaddie-agent
           - user.email: cloudwaddie-agent@users.noreply.github.com
+          - ALL commits MUST be co-authored to the repo owner using: `git commit -m "message" -m "Co-authored-by: CloudWaddie <CloudWaddie@users.noreply.github.com>"`
           PROMPT_EOF
           )
           jq --arg append "$PROMPT_APPEND" '.agents.Sisyphus.prompt_append = $append' "$OMO_JSON" > /tmp/omo.json && mv /tmp/omo.json "$OMO_JSON"
@@ -490,6 +496,7 @@ jobs:
           fi
 
       - name: Run oh-my-opencode
+        id: agent-run
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           USER_COMMENT: ${{ steps.context.outputs.comment }}
@@ -549,12 +556,24 @@ jobs:
 
           ### [CODE RED] MANDATORY OUTPUT REQUIREMENT
 
-          **YOU MUST POST AT LEAST ONE COMMENT. SILENT COMPLETION = FAILURE.**
+          **YOU MUST POST AT least one comment. SILENT COMPLETION = FAILURE.**
 
           - Every task MUST result in at least one comment via `gh issue comment` or `gh pr comment`
           - Explain what you found, what you did, or why you couldn't complete the task
           - NEVER finish without posting a comment - the user cannot see console output
           - If you have nothing to report, comment to acknowledge you saw the request and explain why no action was needed
+
+          ---
+
+          ### [CODE RED] MANDATORY CO-AUTHORING
+
+          **ALL COMMITS MUST be co-authored to the repo owner (CloudWaddie).**
+
+          When making commits, ALWAYS use this format:
+          ```bash
+          git commit -m "your message" -m "Co-authored-by: CloudWaddie <CloudWaddie@users.noreply.github.com>"
+          ```
+          This applies to ALL commits, including PRs and every single commit in feature branches.
 
           ---
 
@@ -662,7 +681,53 @@ jobs:
           # Use Python for USER_COMMENT to handle all special characters safely
           PROMPT=$(python3 -c "import sys; print(sys.stdin.read().replace('COMMENT_PLACEHOLDER', '''$USER_COMMENT'''))" <<< "$PROMPT")
           
-          stdbuf -oL -eL bun run oh-my-opencode/dist/cli/index.js run "$PROMPT"
+          # Trap SIGTERM (exit 143) to handle GitHub runner shutdown gracefully.
+          # When the runner receives a shutdown signal, we forward it to the agent
+          # process and exit with a distinct code so the notification step can detect it.
+          AGENT_PID=""
+          cleanup() {
+            echo "::warning::Received SIGTERM - runner is shutting down"
+            if [[ -n "$AGENT_PID" ]]; then
+              kill -TERM "$AGENT_PID" 2>/dev/null || true
+              wait "$AGENT_PID" 2>/dev/null || true
+            fi
+            pkill -TERM -f "opencode" 2>/dev/null || true
+            exit 143
+          }
+          trap cleanup SIGTERM
+
+          stdbuf -oL -eL bun run oh-my-opencode/dist/cli/index.js run "$PROMPT" &
+          AGENT_PID=$!
+          wait $AGENT_PID
+          EXIT_CODE=$?
+          exit $EXIT_CODE
+
+      - name: Notify on agent interruption
+        if: steps.agent-run.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          CONTEXT_TYPE="${{ steps.context.outputs.type }}"
+          CONTEXT_NUMBER="${{ steps.context.outputs.number }}"
+          if [[ -z "$CONTEXT_NUMBER" ]]; then
+            echo "No context number, skipping notification"
+            exit 0
+          fi
+          BODY=$(cat <<'NOTIFY_EOF'
+          :warning: **Agent interrupted** - the GitHub Actions runner was shut down or cancelled before I could finish.
+
+          This can happen when:
+          - The runner VM was preempted or recycled by GitHub
+          - Another workflow run replaced this one in the concurrency queue
+
+          Please re-trigger by mentioning `@cloudwaddie-agent` again.
+          NOTIFY_EOF
+          )
+          if [[ "$CONTEXT_TYPE" == "pr" ]]; then
+            gh pr comment "$CONTEXT_NUMBER" --body "$BODY" || true
+          else
+            gh issue comment "$CONTEXT_NUMBER" --body "$BODY" || true
+          fi
 
       - name: Update reaction
         if: always()
