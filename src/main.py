@@ -238,16 +238,47 @@ async def yupp_bridge_exception_handler(request: Request, exc: YuppBridgeExcepti
 
 @app.get("/v1/models", response_model=ModelList)
 async def list_models(request: Request):
-    """List available models."""
+    """List available models from Yupp AI."""
     require_api_key(request)
     
-    # Return available models
-    # In a real implementation, this would fetch from Yupp AI
-    models = [
-        ModelInfo(id="gpt-4o", object="model", created=1700000000, owned_by="openai"),
-        ModelInfo(id="claude-3-5-sonnet", object="model", created=1700000000, owned_by="anthropic"),
-        ModelInfo(id="gemini-1.5-pro", object="model", created=1700000000, owned_by="google"),
-    ]
+    # Get account for making authenticated requests
+    try:
+        account = await auth.get_best_yupp_account()
+        if not account:
+            raise NoValidAccountException("No valid Yupp account available")
+    except Exception as e:
+        logger.error(f"Failed to get account: {e}")
+        raise NoValidAccountException("No valid Yupp account available")
+    
+    # Get config for proxy
+    cfg = get_config()
+    proxy = cfg.get("proxy")
+    
+    # Fetch models from Yupp AI
+    try:
+        yupp_models = await transport.fetch_yupp_models(account=account, proxy=proxy)
+    except Exception as e:
+        logger.error(f"Failed to fetch models from Yupp AI: {e}")
+        # Fallback to empty list if fetch fails
+        yupp_models = []
+    
+    # Convert to ModelInfo format
+    models = []
+    for m in yupp_models:
+        models.append(ModelInfo(
+            id=m.get("id", ""),
+            object="model",
+            created=m.get("created", 1700000000),
+            owned_by=m.get("owned_by", "yupp"),
+        ))
+    
+    # If no models fetched, return fallback
+    if not models:
+        models = [
+            ModelInfo(id="gpt-4o", object="model", created=1700000000, owned_by="openai"),
+            ModelInfo(id="claude-3-5-sonnet", object="model", created=1700000000, owned_by="anthropic"),
+            ModelInfo(id="gemini-1.5-pro", object="model", created=1700000000, owned_by="google"),
+        ]
     
     return ModelList(object="list", data=models)
 
