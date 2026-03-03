@@ -6,6 +6,4 @@ sse-starlette==2.0.0
 aiohttp==3.9.5
 uvicorn==0.30.0
 pydantic==2.8.2
-pydantic-settings==2.3.4
 slowapi==0.1.9
-prometheus-client==0.20.0
