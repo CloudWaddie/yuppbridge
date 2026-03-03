@@ -5,6 +5,7 @@ Exposes POST /api/v1/chat/completions and proxies requests through Yupp AI's int
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -160,8 +161,8 @@ async def lifespan(app: FastAPI):
     cfg = get_config()
     tokens = config.get_auth_tokens(cfg)
     if tokens:
-        auth.load_yupp_accounts(",".join(tokens))
-        logger.info(f"Loaded %d accounts", len(tokens))
+        await auth.load_yupp_accounts(",".join(tokens))
+        logger.info("Loaded %d accounts", len(tokens))
     
     yield
     
@@ -321,20 +322,39 @@ async def chat_completions(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _hash_api_key(api_key: str) -> str:
+    """Hash API key for safe display in metrics."""
+    return hashlib.sha256(api_key.encode()).hexdigest()[:16]
+
+
 def _track_usage(api_key: str, model: str, tokens: int) -> None:
-    """Track API key usage."""
+    """Track API key usage using counters to prevent memory exhaustion."""
     app_state = _get_app_state()
     if 'api_key_usage' not in app_state:
         app_state['api_key_usage'] = {}
     
-    if api_key not in app_state['api_key_usage']:
-        app_state['api_key_usage'][api_key] = []
+    # Use hashed API key as key to avoid storing raw keys in memory
+    hashed_key = _hash_api_key(api_key)
     
-    app_state['api_key_usage'][api_key].append({
-        "model": model,
-        "tokens": tokens,
-        "timestamp": time.time(),
-    })
+    if hashed_key not in app_state['api_key_usage']:
+        app_state['api_key_usage'][hashed_key] = {
+            'total_tokens': 0,
+            'request_count': 0,
+            'models': {},
+        }
+    
+    # Increment total tokens
+    app_state['api_key_usage'][hashed_key]['total_tokens'] += tokens
+    app_state['api_key_usage'][hashed_key]['request_count'] += 1
+    
+    # Track per-model usage
+    if model not in app_state['api_key_usage'][hashed_key]['models']:
+        app_state['api_key_usage'][hashed_key]['models'][model] = {
+            'tokens': 0,
+            'requests': 0,
+        }
+    app_state['api_key_usage'][hashed_key]['models'][model]['tokens'] += tokens
+    app_state['api_key_usage'][hashed_key]['models'][model]['requests'] += 1
 
 
 async def _stream_chat(
@@ -533,7 +553,7 @@ async def reload_config(request: Request):
     tokens = config.get_auth_tokens(cfg)
     
     if tokens:
-        auth.load_yupp_accounts(",".join(tokens))
+        await auth.load_yupp_accounts(",".join(tokens))
     
     logger.info("Configuration reloaded")
     
@@ -563,16 +583,37 @@ async def metrics():
         f"yuppbridge_uptime_seconds {time.time() - _app_start_time if _app_start_time > 0 else 0}",
     ]
     
-    # Add per-api-key usage
+    # Add per-api-key usage (now using hashed keys with counters)
     usage = app_state.get('api_key_usage', {})
-    for api_key, usage_list in usage.items():
-        total_tokens = sum(u.get('tokens', 0) for u in usage_list)
+    for hashed_key, usage_data in usage.items():
+        total_tokens = usage_data.get('total_tokens', 0)
+        request_count = usage_data.get('request_count', 0)
         metric_lines.extend([
             "",
             f"# HELP yuppbridge_tokens_total Total tokens used for API key",
             "# TYPE yuppbridge_tokens_total counter",
-            f'yuppbridge_tokens_total{{api_key="{api_key}"}} {total_tokens}',
+            f'yuppbridge_tokens_total{{api_key="{hashed_key}"}} {total_tokens}',
+            "",
+            f"# HELP yuppbridge_requests_total Total requests per API key",
+            "# TYPE yuppbridge_requests_total counter",
+            f'yuppbridge_api_requests_total{{api_key="{hashed_key}"}} {request_count}',
         ])
+        
+        # Add per-model breakdown
+        models = usage_data.get('models', {})
+        for model, model_data in models.items():
+            model_tokens = model_data.get('tokens', 0)
+            model_requests = model_data.get('requests', 0)
+            metric_lines.extend([
+                "",
+                f"# HELP yuppbridge_model_tokens_total Tokens used per model",
+                "# TYPE yuppbridge_model_tokens_total counter",
+                f'yuppbridge_model_tokens_total{{api_key="{hashed_key}",model="{model}"}} {model_tokens}',
+                "",
+                f"# HELP yuppbridge_model_requests_total Requests per model",
+                "# TYPE yuppbridge_model_requests_total counter",
+                f'yuppbridge_model_requests_total{{api_key="{hashed_key}",model="{model}"}} {model_requests}',
+            ])
     
     return StreamingResponse(
         iter(["\n".join(metric_lines)]),
