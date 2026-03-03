@@ -242,12 +242,9 @@ async def list_models(request: Request):
     require_api_key(request)
     
     # Get account for making authenticated requests
-    try:
-        account = await auth.get_best_yupp_account()
-        if not account:
-            raise NoValidAccountException("No valid Yupp account available")
-    except Exception as e:
-        logger.error(f"Failed to get account: {e}")
+    account = await auth.get_best_yupp_account()
+    if not account:
+        logger.error("No valid Yupp account available after attempting to retrieve.")
         raise NoValidAccountException("No valid Yupp account available")
     
     # Get config for proxy
@@ -268,16 +265,16 @@ async def list_models(request: Request):
         models.append(ModelInfo(
             id=m.get("id", ""),
             object="model",
-            created=m.get("created", 1700000000),
+            created=m.get("created", constants.DEFAULT_MODEL_CREATED_TIMESTAMP),
             owned_by=m.get("owned_by", "yupp"),
         ))
     
     # If no models fetched, return fallback
     if not models:
         models = [
-            ModelInfo(id="gpt-4o", object="model", created=1700000000, owned_by="openai"),
-            ModelInfo(id="claude-3-5-sonnet", object="model", created=1700000000, owned_by="anthropic"),
-            ModelInfo(id="gemini-1.5-pro", object="model", created=1700000000, owned_by="google"),
+            ModelInfo(id="gpt-4o", object="model", created=constants.DEFAULT_MODEL_CREATED_TIMESTAMP, owned_by="openai"),
+            ModelInfo(id="claude-3-5-sonnet", object="model", created=constants.DEFAULT_MODEL_CREATED_TIMESTAMP, owned_by="anthropic"),
+            ModelInfo(id="gemini-1.5-pro", object="model", created=constants.DEFAULT_MODEL_CREATED_TIMESTAMP, owned_by="google"),
         ]
     
     return ModelList(object="list", data=models)

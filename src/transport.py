@@ -460,23 +460,15 @@ async def fetch_yupp_models(
     account: Dict[str, Any],
     proxy: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Fetch available models from Yupp AI.
-    
-    Returns a list of model dictionaries with id, name, and metadata.
-    """
     scraper = create_scraper()
     
     if proxy:
         scraper.proxies = {"http": proxy, "https": proxy}
     
-    # Set auth cookie
     scraper.cookies.set(constants.SESSION_TOKEN_COOKIE, account["token"])
     
-    # Build the trpc request URL
     url = f"{constants.YUPP_BASE_URL}/api/trpc/model.getModelInfoList?scribble.getScribbleByLabel"
     
-    # trpc batch payload for model info
     payload = [
         {
             "json": {
@@ -485,31 +477,32 @@ async def fetch_yupp_models(
         }
     ]
     
+    loop = asyncio.get_event_loop()
+    
     try:
-        response = scraper.post(
-            url,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-            },
-            timeout=constants.DEFAULT_TIMEOUT,
+        response = await loop.run_in_executor(
+            _executor,
+            lambda: scraper.post(
+                url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                },
+                timeout=constants.DEFAULT_TIMEOUT,
+            ),
         )
         response.raise_for_status()
         
-        data = response.json()
-        log_debug(f"Models response: {data}")
+        data = await loop.run_in_executor(_executor, lambda: response.json())
+        log_debug(f"Models response received. Count: {len(data) if isinstance(data, list) else 'N/A'}")
         
         models = []
         
-        # Parse trpc response format
-        # The response is an array with result objects containing data.json
         if isinstance(data, list):
             for item in data:
                 result = item.get("result", {})
                 json_data = result.get("data", {}).get("json", {})
                 
-                # Extract models from the response
-                # Yupp AI returns models in different formats
                 model_list = json_data if isinstance(json_data, list) else json_data.get("models", [])
                 
                 for model in model_list:
@@ -519,7 +512,7 @@ async def fetch_yupp_models(
                             "id": model_id,
                             "name": model.get("displayName") or model.get("name", model_id),
                             "object": "model",
-                            "created": model.get("createdAt", 1700000000),
+                            "created": model.get("createdAt", constants.DEFAULT_MODEL_CREATED_TIMESTAMP),
                             "owned_by": model.get("owner", "yupp"),
                             "description": model.get("description", ""),
                             "tags": model.get("tags", []),
@@ -527,6 +520,12 @@ async def fetch_yupp_models(
         
         return models
         
+    except httpx.HTTPError as e:
+        log_debug(f"Failed to fetch models due to HTTP error: {e}")
+        return []
+    except json.JSONDecodeError as e:
+        log_debug(f"Failed to parse models response: {e}")
+        return []
     except Exception as e:
-        log_debug(f"Failed to fetch models: {e}")
+        log_debug(f"An unexpected error occurred while fetching models: {e}")
         return []
