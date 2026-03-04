@@ -17,6 +17,8 @@ PRIVATE_CHAT_ENDPOINT = "/api/trpc/chat.updateSharingSettings"
 PRESIGNED_URL_ENDPOINT = "/api/trpc/chat.createPresignedURLForUpload"
 ATTACHMENT_ENDPOINT = "/api/trpc/chat.createAttachmentForUploadedFile"
 SIGNED_IMAGE_ENDPOINT = "/api/trpc/chat.getSignedImage"
+CREDITS_GET_ENDPOINT = "/api/trpc/credits.getCredits"
+TURN_ANNOTATIONS_ENDPOINT = "/api/trpc/evals.getTurnAnnotations"
 
 # Default fallback NextAction tokens
 NEXT_ACTION_TOKENS = {
@@ -81,3 +83,17 @@ TAG_MAPPING = {
     "isReasoning": "🧠",
     "isImageGeneration": "🎨",
 }
+
+# Reward and feedback settings
+FEEDBACK_GOOD_REASONS = ["Helpful", "Interesting", "Accurate", "Clear", "Well explained"]
+FEEDBACK_BAD_REASONS = ["Not helpful", "Inaccurate", "Unclear"]
+# Feedback distribution (Option 3)
+# 60%: One GOOD, one BAD
+# 30%: Both GOOD
+# 10%: One GOOD, other minimal/empty
+FEEDBACK_PATTERN_ONE_GOOD_ONE_BAD = 0.60
+FEEDBACK_PATTERN_BOTH_GOOD = 0.30
+FEEDBACK_PATTERN_ONE_GOOD_MINIMAL = 0.10
+# Timing settings for reward claiming
+REWARD_CLAIM_MIN_DELAY = 1.0  # seconds
+REWARD_CLAIM_MAX_DELAY = 3.0  # seconds

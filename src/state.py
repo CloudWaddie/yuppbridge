@@ -31,6 +31,9 @@ _token_extractor: Optional[Any] = None
 ImagesCache: Dict[str, dict] = {}
 MAX_CACHE_SIZE = 1000
 
+# Credit balance tracking per account
+credit_balances: Dict[str, int] = {}  # token -> balance
+
 
 def get_accounts() -> List[Account]:
     """Get all accounts."""
@@ -65,12 +68,13 @@ def increment_index() -> None:
 
 def reset_state() -> None:
     """Reset all state (for testing)."""
-    global accounts, current_account_index, chat_sessions, ImagesCache, _token_extractor
+    global accounts, current_account_index, chat_sessions, ImagesCache, _token_extractor, credit_balances
     accounts = []
     current_account_index = 0
     chat_sessions = {}
     ImagesCache = {}
     _token_extractor = None
+    credit_balances = {}
 
 
 def evict_cache_if_needed() -> None:
@@ -92,3 +96,20 @@ def get_token_extractor() -> Optional[Any]:
     """Get token extractor instance."""
     global _token_extractor
     return _token_extractor
+
+
+def get_credit_balance(token: str) -> Optional[int]:
+    """Get credit balance for account."""
+    global credit_balances
+    return credit_balances.get(token)
+
+
+def set_credit_balance(token: str, balance: int) -> None:
+    """Set credit balance for account."""
+    global credit_balances
+    credit_balances[token] = balance
+
+
+def update_credit_balance(token: str, balance: int) -> None:
+    """Update credit balance for account (alias for set_credit_balance)."""
+    set_credit_balance(token, balance)

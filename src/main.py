@@ -157,6 +157,9 @@ async def lifespan(app: FastAPI):
     
     logger.info("YuppBridge starting up...")
     
+    # Run config wizard if no config exists
+    config.ensure_config_exists()
+    
     # Load accounts from config
     cfg = get_config()
     tokens = config.get_auth_tokens(cfg)
@@ -236,7 +239,7 @@ async def yupp_bridge_exception_handler(request: Request, exc: YuppBridgeExcepti
     )
 
 
-@app.get("/v1/models", response_model=ModelList)
+@app.get("/api/v1/models", response_model=ModelList)
 async def list_models(request: Request):
     """List available models from Yupp AI."""
     require_api_key(request)
@@ -586,6 +589,42 @@ async def reload_config(request: Request):
     logger.info("Configuration reloaded")
     
     return {"status": "reloaded", "accounts": len(tokens)}
+
+@app.get("/api/v1/credits")
+async def get_credits(request: Request):
+    """Get credit balance for the authenticated account."""
+    api_key = require_api_key(request)
+    
+    # Get account
+    try:
+        account = await auth.get_best_yupp_account()
+        if not account:
+            raise NoValidAccountException()
+    except Exception as e:
+        logger.error(f"Failed to get account: {e}")
+        raise NoValidAccountException()
+    
+    # Get credit balance
+    from . import rewards
+    
+    cfg = get_config()
+    proxy = cfg.get("proxy")
+    
+    scraper = transport.create_scraper()
+    if proxy:
+        scraper.proxies = {"http": proxy, "https": proxy}
+    
+    balance = await rewards.get_credit_balance(
+        session=scraper,
+        session_token=account.get('token', '')
+    )
+    
+    if balance is None:
+        raise HTTPException(status_code=500, detail="Failed to fetch credit balance")
+    
+    return {
+        "balance": balance
+    }
 
 
 @app.get("/metrics")

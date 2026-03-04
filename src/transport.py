@@ -246,6 +246,41 @@ async def _process_stream_response(
     account: Dict[str, Any],
     model: str,
 ) -> AsyncGenerator[str, None]:
+    """Process the streaming response from Yupp AI with RSC reference resolution."""
+    
+    # Line pattern for SSE - matches hex chunk IDs (0-9, a-f)
+    line_pattern = re.compile(rb'^([0-9a-f]+):(.+)$')
+    
+    think_blocks: Dict[str, str] = {}
+    image_blocks: Dict[str, str] = {}
+    
+    # RSC chunk storage for reference resolution
+    chunk_map: Dict[str, Any] = {}  # Store all chunks by their hex ID
+    
+    capturing_ref_id: Optional[str] = None
+    capturing_lines: List[bytes] = []
+    
+    target_stream_id = None
+    variant_stream_id = None
+    quick_response_id = None
+    turn_id = None
+    left_message_id = None
+    right_message_id = None
+    
+    def resolve_reference(value: Any) -> Any:
+        """Resolve RSC reference ($@xx) to actual value from chunk map."""
+        if isinstance(value, str) and value.startswith("$@"):
+            ref_id = value[2:]  # Remove $@ prefix
+            if ref_id in chunk_map:
+                resolved = chunk_map[ref_id]
+                log_debug(f"Resolved {value} -> {resolved}")
+                # If resolved value is also a reference, resolve recursively
+                if isinstance(resolved, dict) and "curr" in resolved:
+                    return resolved.get("curr")
+                return resolved
+            else:
+                log_debug(f"Reference {value} not found in chunk_map (yet)")
+        return value
     """Process the streaming response from Yupp AI."""
     
     # Line pattern for SSE
@@ -327,12 +362,30 @@ async def _process_stream_response(
         except json.JSONDecodeError:
             continue
         
+        # Store chunk in map for reference resolution
+        chunk_map[chunk_id] = data
+        log_debug(f"Stored chunk {chunk_id} in map")
         # Process based on chunk ID
         if chunk_id == "1":
             # Initial response
             if isinstance(data, dict):
                 left_stream = data.get("leftStream", {})
                 right_stream = data.get("rightStream", {})
+                
+                # Assign stream IDs for content matching
+                if left_stream and left_stream != "$undefined":
+                    target_stream_id = _extract_ref_id(left_stream.get("next"))
+                    # Strip $@ prefix for chunk ID matching
+                    if target_stream_id and target_stream_id.startswith("$@"):
+                        target_stream_id = target_stream_id[2:]
+                    log_debug(f"Assigned target_stream_id: {target_stream_id}")
+                
+                if right_stream and right_stream != "$undefined":
+                    variant_stream_id = _extract_ref_id(right_stream.get("next"))
+                    # Strip $@ prefix for chunk ID matching
+                    if variant_stream_id and variant_stream_id.startswith("$@"):
+                        variant_stream_id = variant_stream_id[2:]
+                    log_debug(f"Assigned variant_stream_id: {variant_stream_id}")
                 
                 # Extract stream IDs
                 if data.get("quickResponse", {}) != "$undefined":
@@ -341,7 +394,12 @@ async def _process_stream_response(
                     )
                 
                 if data.get("turnId", {}) != "$undefined":
-                    turn_id = _extract_ref_id(data.get("turnId", {}).get("next"))
+                    # turnId is a direct value, not a reference object
+                    turn_id_value = data.get("turnId")
+                    if isinstance(turn_id_value, str):
+                        turn_id = turn_id_value
+                    elif isinstance(turn_id_value, dict):
+                        turn_id = _extract_ref_id(turn_id_value.get("next"))
                 
                 if data.get("leftMessageId", {}) != "$undefined":
                     left_message_id = _extract_ref_id(
@@ -374,7 +432,51 @@ async def _process_stream_response(
                 if content:
                     yield f"data: {json.dumps({'content': f'[Quick] {content}'})}\n\n"
     
-    # End of stream
+    # End of stream - resolve references and trigger reward flow
+    # Wait a moment for any late-arriving chunks
+    await asyncio.sleep(0.5)
+    
+    # Resolve all reference IDs to actual values
+    turn_id = resolve_reference(turn_id)
+    left_message_id = resolve_reference(left_message_id)
+    right_message_id = resolve_reference(right_message_id)
+    
+    log_debug(f"Final resolved IDs - turn_id: {turn_id}, left: {left_message_id}, right: {right_message_id}")
+    log_debug(f"Chunk map keys: {list(chunk_map.keys())}")
+    print(f"[REWARD DEBUG] Final resolved IDs - turn_id: {turn_id}, left: {left_message_id}, right: {right_message_id}")
+    print(f"[REWARD DEBUG] Chunk map keys: {list(chunk_map.keys())}")
+    
+    if turn_id and left_message_id and right_message_id:
+        try:
+            # Import rewards module
+            from . import rewards
+            
+            # Create message IDs list
+            message_ids = [left_message_id, right_message_id]
+            
+            # Submit feedback and claim reward in background
+            loop = asyncio.get_event_loop()
+            scraper = create_scraper()
+            
+            async def claim_in_background():
+                try:
+                    balance = await rewards.process_reward_flow(
+                        session=scraper,
+                        turn_id=turn_id,
+                        message_ids=message_ids,
+                        session_token=account.get('token', '')
+                    )
+                    if balance is not None:
+                        state.update_credit_balance(account.get('token', ''), balance)
+                        log_debug(f"Reward claimed successfully. New balance: {balance}")
+                except Exception as e:
+                    log_debug(f"Background reward claim failed: {e}")
+            
+            # Fire and forget
+            asyncio.create_task(claim_in_background())
+        except Exception as e:
+            log_debug(f"Failed to initiate reward flow: {e}")
+    
     yield "data: [DONE]\n\n"
 
 
@@ -414,23 +516,25 @@ async def sync_record_feedback(
     left_message_id: str,
     right_message_id: str,
 ) -> Optional[str]:
-    """Record model feedback."""
+    """Record model feedback with randomized patterns (Option 3)."""
     try:
+        from . import rewards
+        
         log_debug(f"Recording feedback for turn {turn_id}...")
+        
+        # Generate randomized feedback
+        pattern = rewards.generate_feedback_pattern()
+        message_ids = [left_message_id, right_message_id]
+        message_evals = rewards.generate_message_evals(message_ids, pattern)
+        
         url = f"{constants.YUPP_BASE_URL}{constants.FEEDBACK_RECORD_ENDPOINT}?batch=1"
         payload = {
             "0": {
                 "json": {
                     "turnId": turn_id,
+                    "isOnboarding": False,
                     "evalType": "SELECTION",
-                    "messageEvals": [
-                        {
-                            "messageId": right_message_id,
-                            "rating": "GOOD",
-                            "reasons": ["Fast"],
-                        },
-                        {"messageId": left_message_id, "rating": "BAD", "reasons": []},
-                    ],
+                    "messageEvals": message_evals,
                     "comment": "",
                     "requireReveal": False,
                 }
@@ -447,7 +551,7 @@ async def sync_record_feedback(
             final_reward = json_data.get("finalRewardAmount")
             
             if final_reward:
-                log_debug(f"Feedback recorded - evalId: {eval_id}, reward: {final_reward}")
+                log_debug(f"Feedback recorded - evalId: {eval_id}, reward: {final_reward}, pattern: {pattern}")
                 return eval_id
         
         return None
@@ -467,26 +571,17 @@ async def fetch_yupp_models(
     
     scraper.cookies.set(constants.SESSION_TOKEN_COOKIE, account["token"])
     
-    url = f"{constants.YUPP_BASE_URL}/api/trpc/model.getModelInfoList?scribble.getScribbleByLabel"
-    
-    payload = [
-        {
-            "json": {
-                "isFetchScribble": False,
-            }
-        }
-    ]
+    url = f"{constants.YUPP_BASE_URL}/api/trpc/model.getModelInfoList?batch=1&input=%7B%220%22%3A%7B%22json%22%3A%7B%22includeRecents%22%3Atrue%7D%7D%7D"
     
     loop = asyncio.get_event_loop()
     
     try:
         response = await loop.run_in_executor(
             _executor,
-            lambda: scraper.post(
+            lambda: scraper.get(
                 url,
-                json=payload,
                 headers={
-                    "Content-Type": "application/json",
+                    "Accept": "*/*",
                 },
                 timeout=constants.DEFAULT_TIMEOUT,
             ),
@@ -494,6 +589,35 @@ async def fetch_yupp_models(
         response.raise_for_status()
         
         data = await loop.run_in_executor(_executor, lambda: response.json())
+        
+        # Check for TRPC errors
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and "error" in item:
+                    error_data = item.get("error", {})
+                    error_json = error_data.get("json", {})
+                    error_msg = error_json.get("message", "Unknown error")
+                    error_code = error_json.get("code", "N/A")
+                    log_debug(f"TRPC Error in models response: Code={error_code}, Message={error_msg}")
+                    logger.error(f"Yupp AI TRPC Error (models): {error_msg}")
+                    return []
+        
+        models = []
+        log_debug(f"Models response received. Count: {len(data) if isinstance(data, list) else 'N/A'}")
+        
+        # Check for TRPC errors
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and "error" in item:
+                    error_data = item.get("error", {})
+                    error_json = error_data.get("json", {})
+                    error_msg = error_json.get("message", "Unknown error")
+                    error_code = error_json.get("code", "N/A")
+                    log_debug(f"TRPC Error in models response: Code={error_code}, Message={error_msg}")
+                    logger.error(f"Yupp AI TRPC Error (models): {error_msg}")
+                    return []
+        
+        models = []
         log_debug(f"Models response received. Count: {len(data) if isinstance(data, list) else 'N/A'}")
         
         models = []
@@ -506,17 +630,45 @@ async def fetch_yupp_models(
                 model_list = json_data if isinstance(json_data, list) else json_data.get("models", [])
                 
                 for model in model_list:
-                    model_id = model.get("modelName") or model.get("id") or model.get("name", "")
+                    # API returns: id (UUID), name (internal name), label (display name)
+                    model_name = (model.get("name") or model.get("id", "")).strip()  # Use internal name as ID
+                    if model_name:
+                        display_name = (model.get("label") or model.get("shortLabel") or model_name).strip()
+                        models.append({
+                            "id": model_name,  # Use internal name (e.g., gpt-5.3-codex<>low)
+                            "name": display_name,  # Display name
+                            "object": "model",
+                            "created": model.get("timeAddedMillis", constants.DEFAULT_MODEL_CREATED_TIMESTAMP) // 1000,  # Convert ms to seconds
+                            "owned_by": (model.get("publisher") or "yupp").strip(),
+                            "description": (model.get("family") or "").strip(),
+                            "tags": [],  # Tags not in this format
+                        })
+                    # API returns: id (UUID), name (internal name), label (display name)
+                    model_name = model.get("name") or model.get("id", "")  # Use internal name as ID
+                    if model_name:
+                        models.append({
+                            "id": model_name,  # Use internal name (e.g., gpt-5.3-codex<>low)
+                            "name": model.get("label") or model.get("shortLabel") or model_name,  # Display name
+                            "object": "model",
+                            "created": model.get("timeAddedMillis", constants.DEFAULT_MODEL_CREATED_TIMESTAMP) // 1000,  # Convert ms to seconds
+                            "owned_by": model.get("publisher", "yupp"),
+                            "description": model.get("family", ""),
+                            "tags": [],  # Tags not in this format
+                        })
+                    # API returns: name, label, shortLabel, publisher, family
+                    model_id = model.get("name") or model.get("id", "")
                     if model_id:
                         models.append({
                             "id": model_id,
-                            "name": model.get("displayName") or model.get("name", model_id),
+                            "name": model.get("label") or model.get("shortLabel") or model_id,
                             "object": "model",
-                            "created": model.get("createdAt", constants.DEFAULT_MODEL_CREATED_TIMESTAMP),
-                            "owned_by": model.get("owner", "yupp"),
-                            "description": model.get("description", ""),
-                            "tags": model.get("tags", []),
+                            "created": model.get("timeAddedMillis", constants.DEFAULT_MODEL_CREATED_TIMESTAMP) // 1000,  # Convert ms to seconds
+                            "owned_by": model.get("publisher", "yupp"),
+                            "description": model.get("family", ""),
+                            "tags": [],  # Tags not in this format
                         })
+        
+        log_debug(f"Successfully parsed {len(models)} models from Yupp AI")
         
         return models
         
