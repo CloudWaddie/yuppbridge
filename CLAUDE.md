@@ -6,7 +6,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ```bash
 # Run the server
-python src/main.py
+python run.py
 
 # Run all tests
 python -m pytest tests/
@@ -18,7 +18,7 @@ python -m pytest tests/test_auth.py -v
 python -m pytest tests/test_auth.py::TestAuth::test_load_yupp_accounts_from_string -v
 
 # Syntax check
-python -c "import ast; ast.parse(open('src/main.py', encoding='utf-8').read()); print('OK')"
+python -m src.main
 ```
 
 Python version: **3.12** (see `.python-version`).

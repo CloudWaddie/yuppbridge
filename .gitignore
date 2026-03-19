@@ -76,4 +76,5 @@ Thumbs.db
 
 # Project specific
 config.json
+config.yml
 *.db

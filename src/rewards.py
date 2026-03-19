@@ -164,12 +164,9 @@ async def submit_feedback(
         
         response.raise_for_status()
         
-        response = session.post(url, json=payload, headers=headers, timeout=constants.DEFAULT_TIMEOUT)
-        response.raise_for_status()
-        
         data = response.json()
         
-        # Check for TRPC errors
+        # Check for TRPC errors and extract evalId
         if isinstance(data, list) and len(data) > 0:
             first_item = data[0]
             
@@ -184,12 +181,6 @@ async def submit_feedback(
             
             # Extract evalId from successful response
             result = first_item.get("result", {})
-            eval_data = result.get("data", {}).get("json", {})
-            eval_id = eval_data.get("evalId")
-        
-        # Extract evalId from response
-        if isinstance(data, list) and len(data) > 0:
-            result = data[0].get("result", {})
             eval_data = result.get("data", {}).get("json", {})
             eval_id = eval_data.get("evalId")
             

@@ -216,7 +216,7 @@ def ensure_config_exists(config_file: Optional[str] = None) -> bool:
         print("Quick Start Guide:")
         print()
         print("  1. Start the server:")
-        print("     python src/main.py")
+        print("     python run.py")
         print()
         print("  2. Test the API:")
         print(f"     curl -H 'Authorization: Bearer {api_key}' \\")

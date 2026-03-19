@@ -553,26 +553,50 @@ async def health_check():
 @app.get("/dashboard", response_model=DashboardResponse)
 async def dashboard(request: Request):
     """Simple dashboard for managing the bridge."""
-    # Check password - require auth header
+    # Check password - support multiple auth methods for browser access
     auth_header = request.headers.get("Authorization", "")
+    query_pwd = request.query_params.get("password", "")
+    cookie_pwd = request.cookies.get("dashboard_password", "")
+    
     cfg = get_config()
     password = cfg.get("password", "")
     
     if password:
-        # Check for password in header
-        if not auth_header.startswith("Bearer ") or auth_header[7:] != password:
-            raise AuthenticationException("Invalid or missing dashboard password")
+        # Check for password in header, query param, or cookie
+        is_authed = False
+        
+        # 1. Bearer Token
+        if auth_header.startswith("Bearer ") and auth_header[7:] == password:
+            is_authed = True
+        # 2. Query Parameter
+        elif query_pwd == password:
+            is_authed = True
+        # 3. Cookie
+        elif cookie_pwd == password:
+            is_authed = True
+            
+        if not is_authed:
+            raise AuthenticationException("Invalid or missing dashboard password. Tip: Use /dashboard?password=YOUR_PASSWORD to login via browser.")
     
     app_state = _get_app_state()
     uptime = time.time() - _app_start_time if _app_start_time > 0 else 0
     
-    return DashboardResponse(
+    response_data = DashboardResponse(
         status="ok",
         accounts=len(state.get_accounts()),
         api_keys=len(cfg.get("api_keys", [])),
         total_requests=app_state.get('request_count', 0),
         uptime_seconds=uptime,
     )
+    
+    from fastapi.responses import JSONResponse
+    response = JSONResponse(content=response_data.dict())
+    
+    # Set cookie if authenticated via query param
+    if query_pwd == password and password:
+        response.set_cookie(key="dashboard_password", value=password, httponly=True)
+        
+    return response
 
 
 @app.post("/api/v1/config/reload")
