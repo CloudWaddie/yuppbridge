@@ -7,3 +7,6 @@ aiohttp==3.9.5
 uvicorn==0.30.0
 pydantic==2.8.2
 slowapi==0.1.9
+scrapling
+patchright
+camoufox

@@ -56,10 +56,23 @@ MAX_CACHE_SIZE = 1000
 
 # HTTP Headers
 DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) "
+    "Gecko/20100101 Firefox/148.0"
 )
+
+# Kasada & Human Verification Headers
+KASADA_URL = "https://yupp.ai/149e9513-01fa-4fb0-aad4-5ee9000fb5a6/2d20d788-1ac4-463d-88ec-2df6743905e3/p.js"
+KASADA_HEADER_CD = "x-kpsdk-cd"
+KASADA_HEADER_CT = "x-kpsdk-ct"
+KASADA_HEADER_H = "x-kpsdk-h"
+KASADA_HEADER_V = "x-kpsdk-v"
+KASADA_HEADERS = [KASADA_HEADER_CD, KASADA_HEADER_CT, KASADA_HEADER_H, KASADA_HEADER_V]
+HUMAN_VERIFICATION_HEADER = "x-is-human"
+
+# Next.js RSC Headers
+NEXT_RSC_HEADER = "rsc"
+NEXT_PREFETCH_HEADER = "next-router-prefetch"
+NEXT_URL_HEADER = "next-url"
 
 # Cookie names
 SESSION_TOKEN_COOKIE = "__Secure-yupp.session-token"

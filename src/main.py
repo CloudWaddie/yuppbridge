@@ -167,6 +167,14 @@ async def lifespan(app: FastAPI):
         await auth.load_yupp_accounts(",".join(tokens))
         logger.info("Loaded %d accounts", len(tokens))
     
+    # Initialize StealthFetcher
+    try:
+        from .stealth import get_stealth_fetcher
+        fetcher = get_stealth_fetcher()
+        await fetcher.start()
+    except Exception as e:
+        logger.warning(f"StealthFetcher initialization failed: {e}. Falling back to lightweight transport.")
+    
     yield
     
     # Shutdown

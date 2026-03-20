@@ -1,7 +1,7 @@
 """
 Transport layer for YuppBridge.
 
-Contains streaming transport implementation using cloudscraper.
+Contains streaming transport implementation using cloudscraper and Scrapling.
 """
 
 import asyncio
@@ -15,19 +15,39 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 import httpx
 
 from . import auth, constants, state, token_extractor as tex
+from .stealth import get_stealth_fetcher
 
 _executor = ThreadPoolExecutor(max_workers=32)
 _executor_shutdown = False
 
 
 def cleanup_executor() -> None:
-    """Clean up the ThreadPoolExecutor on shutdown."""
+    """Clean up the ThreadPoolExecutor and StealthFetcher on shutdown."""
     global _executor_shutdown
     if not _executor_shutdown:
+        # Cleanup StealthFetcher browser context
+        try:
+            from .stealth import get_stealth_fetcher
+            fetcher = get_stealth_fetcher()
+            
+            # Since cleanup might happen outside an event loop or when loop is closing
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(fetcher.close())
+                else:
+                    loop.run_until_complete(fetcher.close())
+            except RuntimeError:
+                # No event loop
+                pass
+        except Exception as e:
+            import logging
+            logging.getLogger("yuppbridge").error(f"Error cleaning up StealthFetcher: {e}")
+
         _executor.shutdown(wait=True)
         _executor_shutdown = True
         import logging
-        logging.getLogger("yuppbridge").info("ThreadPoolExecutor shut down")
+        logging.getLogger("yuppbridge").info("ThreadPoolExecutor and StealthFetcher shut down")
 
 
 def log_debug(message: str) -> None:
@@ -42,7 +62,7 @@ def create_scraper():
         import cloudscraper
         scraper = cloudscraper.create_scraper(
             browser={
-                "browser": "chrome",
+                "browser": "firefox",
                 "platform": "windows",
                 "desktop": True,
                 "mobile": False,
@@ -54,19 +74,45 @@ def create_scraper():
             {
                 "User-Agent": constants.DEFAULT_USER_AGENT,
                 "Accept": "text/x-component, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate",
+                "Accept-Language": "en-AU,en-GB;q=0.9,en;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-origin",
-                "Sec-Ch-Ua": '"Microsoft Edge";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
+                constants.NEXT_RSC_HEADER: "1",
+                constants.NEXT_PREFETCH_HEADER: "1",
+                constants.NEXT_URL_HEADER: "/",
             }
         )
         return scraper
     except ImportError:
         raise ImportError("cloudscraper is required for YuppBridge")
+
+
+def _format_yupp_model_name(model: str) -> str:
+    """Format model name with provider suffix as seen in HAR."""
+    model_lower = model.lower()
+    
+    # Common mappings based on observed HAR patterns
+    if "grok" in model_lower:
+        if "<>" not in model:
+            return f"{model}<>XAI"
+    elif "deepseek" in model_lower:
+        if "<>" not in model:
+            if "thinking" in model_lower:
+                return f"{model}<>thinking<>OPR"
+            return f"{model}<>OPR"
+    elif "gpt" in model_lower:
+        if "<>" not in model:
+            return f"{model}<>OPENAI"
+    elif "claude" in model_lower:
+        if "<>" not in model:
+            return f"{model}<>ANTHROPIC"
+    elif "gemini" in model_lower:
+        if "<>" not in model:
+            return f"{model}<>GOOGLE"
+            
+    return model
 
 
 def format_messages_for_yupp(messages: List[Dict[str, Any]]) -> str:
@@ -137,122 +183,101 @@ async def stream_yupp_chat(
     """
     Stream chat completions from Yupp AI.
     
-    Yields SSE-formatted chunks.
+    Uses SmartTransport: StealthFetcher (Scrapling) for Kasada bypass, 
+    with cloudscraper as fallback.
     """
-    scraper = create_scraper()
-    
-    if proxy:
-        scraper.proxies = {"http": proxy, "https": proxy}
-    
-    # Set auth cookie
-    scraper.cookies.set(constants.SESSION_TOKEN_COOKIE, account["token"])
-    
-    # Get token extractor
-    token_ext = tex.get_token_extractor(jwt_token=account["token"], scraper=scraper)
-    
-    # Prepare messages
     is_new_conversation = conversation_id is None
-    
     if is_new_conversation:
         conversation_id = str(uuid.uuid4())
         prompt = format_messages_for_yupp(messages)
     else:
-        # For existing conversations, just get the last user message
         prompt = messages[-1].get("content", "") if messages else ""
-    
-    log_debug(f"Conversation ID: {conversation_id}, Is new: {is_new_conversation}")
     
     turn_id = str(uuid.uuid4())
     
-    # Prepare files if media provided
-    files = []
-    if media:
-        files = prepare_media(media, scraper, account)
-    
-    # Determine mode
-    mode = "none"  # Default mode from HAR
-    
-    # Support multiple models if comma-separated
-    model_list = []
-    if model:
-        for m in model.split(","):
-            m = m.strip()
-            if m:
-                model_list.append({"modelName": m})
-    
+    # Build payload
+    model_list = [{"modelName": _format_yupp_model_name(m.strip())} for m in model.split(",") if m.strip()]
     if not model_list:
         model_list = "none"
     
-    # Build payload based on HAR structure
     if is_new_conversation:
-        payload = [
-            conversation_id,
-            turn_id,
-            prompt,
-            "$undefined",
-            "$undefined",
-            files,
-            "$undefined",
-            model_list,
-            mode,
-            True,  # isOnboarding?
-            "$undefined",
-            False, # isSharing?
-            {}     # metadata?
-        ]
+        payload = [conversation_id, turn_id, prompt, "$undefined", "$undefined", [], "$undefined", model_list, "none", False, "$undefined", False, {}]
     else:
-        payload = [
-            conversation_id,
-            turn_id,
-            prompt,
-            False,
-            [],
-            model_list,
-            mode,
-        ]
+        payload = [conversation_id, turn_id, prompt, False, [], model_list, "none"]
     
-    # Get next action token
-    next_action = await token_ext.get_token(
-        "new_conversation" if is_new_conversation else "existing_conversation"
-    )
-    
-    # Build URL - HAR shows stream=true query param
     url = f"{constants.YUPP_BASE_URL}/chat/{conversation_id}?stream=true"
     
-    log_debug(f"Streaming from: {url}")
+    # Try StealthFetcher first
+    stealth = get_stealth_fetcher()
+    if stealth.is_active():
+        try:
+            log_debug(f"Using StealthFetcher for {url}")
+            loop = asyncio.get_event_loop()
+            
+            # Scrapling is sync, so run in executor
+            response = await loop.run_in_executor(
+                _executor,
+                lambda: stealth.post(
+                    url=url,
+                    json_data=payload,
+                    headers={
+                        "Accept": "text/x-component",
+                        "Content-Type": "text/plain;charset=UTF-8",
+                        "Origin": constants.YUPP_BASE_URL,
+                    }
+                )
+            )
+            
+            async for chunk in _process_stealth_response(response, account, model):
+                yield chunk
+            return
+        except Exception as e:
+            log_debug(f"StealthFetcher failed: {e}. Falling back to cloudscraper.")
+
+    # Fallback to cloudscraper
+    scraper = create_scraper()
+    if proxy:
+        scraper.proxies = {"http": proxy, "https": proxy}
     
-    # Make request
-    headers = {
-        "Accept": "text/x-component",
-        "Content-Type": "text/plain;charset=UTF-8",
-        "Next-Action": next_action,
-        "Referer": f"{constants.YUPP_BASE_URL}/chat/{conversation_id}?stream=true",
-    }
+    scraper.cookies.set(constants.SESSION_TOKEN_COOKIE, account["token"])
+    token_ext = tex.get_token_extractor(jwt_token=account["token"], scraper=scraper)
     
     try:
-        response = scraper.post(
-            url,
-            json=payload,
-            headers=headers,
-            stream=True,
-            timeout=constants.STREAM_TIMEOUT,
-        )
+        next_action = await token_ext.get_token("new_conversation" if is_new_conversation else "existing_conversation")
+        
+        headers = {
+            "Accept": "text/x-component",
+            "Content-Type": "text/plain;charset=UTF-8",
+            "Next-Action": next_action,
+            "Referer": f"{constants.YUPP_BASE_URL}/chat/{conversation_id}?stream=true",
+            "Origin": constants.YUPP_BASE_URL,
+        }
+        
+        response = scraper.post(url, json=payload, headers=headers, stream=True, timeout=constants.STREAM_TIMEOUT)
         response.raise_for_status()
         
-        # Process streaming response
-        async for chunk in _process_stream_response(
-            response, token_ext, account, model
-        ):
+        async for chunk in _process_stream_response(response, token_ext, account, model):
             yield chunk
-            
     except Exception as e:
-        log_debug(f"Stream error: {e}")
-        # Mark token as failed if it was the issue
-        await token_ext.mark_token_failed(
-            "new_conversation" if is_new_conversation else "existing_conversation",
-            next_action
-        )
+        log_debug(f"Cloudscraper error: {e}")
         raise
+
+
+async def _process_stealth_response(response: Any, account: Dict[str, Any], model: str) -> AsyncGenerator[str, None]:
+    """Process response from StealthFetcher (Scrapling)."""
+    content = response.content if hasattr(response, 'content') else str(response)
+    if isinstance(content, str):
+        content = content.encode()
+        
+    dummy_token_ext = tex.get_token_extractor(jwt_token=account["token"], scraper=None)
+    
+    class MockResponse:
+        def iter_lines(self):
+            for line in content.split(b'\n'):
+                yield line
+                
+    async for chunk in _process_stream_response(MockResponse(), dummy_token_ext, account, model):
+        yield chunk
 
 
 async def _process_stream_response(
@@ -266,17 +291,11 @@ async def _process_stream_response(
     # Line pattern for SSE - matches hex chunk IDs or numeric IDs
     line_pattern = re.compile(rb'^([0-9a-fA-F]+):(.+)$')
     
-    think_blocks: Dict[str, str] = {}
-    
     # RSC chunk storage for reference resolution
     chunk_map: Dict[str, Any] = {}  # Store all chunks by their ID
     
-    capturing_ref_id: Optional[str] = None
-    capturing_lines: List[bytes] = []
-    
     target_stream_id = None
     variant_stream_id = None
-    quick_response_id = None
     turn_id = None
     left_message_id = None
     right_message_id = None
@@ -292,8 +311,6 @@ async def _process_stream_response(
                 if isinstance(resolved, dict) and "curr" in resolved:
                     return resolved.get("curr")
                 return resolved
-            else:
-                log_debug(f"Reference {value} not found in chunk_map (yet)")
         return value
 
     loop = asyncio.get_event_loop()
@@ -317,22 +334,6 @@ async def _process_stream_response(
         
         if isinstance(line, str):
             line = line.encode()
-        
-        # Handle thinking blocks
-        if b"<think>" in line:
-            m = line_pattern.match(line)
-            if m:
-                capturing_ref_id = m.group(1).decode()
-                capturing_lines = [line]
-                continue
-        
-        # Handle capture blocks (thinking/yapp)
-        if capturing_ref_id is not None:
-            capturing_lines.append(line)
-            if b"</yapp>" in line or b"</think>" in line:
-                capturing_ref_id = None
-                capturing_lines = []
-                continue
         
         # Parse line
         match = line_pattern.match(line)
@@ -368,12 +369,6 @@ async def _process_stream_response(
                     if variant_stream_id and variant_stream_id.startswith("$@"):
                         variant_stream_id = variant_stream_id[2:]
                 
-                # Extract other IDs
-                if data.get("quickResponse", {}) != "$undefined":
-                    quick_response_id = _extract_ref_id(
-                        data.get("quickResponse", {}).get("stream", {}).get("next")
-                    )
-                
                 # These are often reference objects with curr/next
                 turn_id = _extract_ref_id(data.get("turnId"))
                 left_message_id = _extract_ref_id(data.get("leftMessageId"))
@@ -387,7 +382,7 @@ async def _process_stream_response(
                     target_stream_id = target_stream_id[2:]
                 content = data.get("curr", "")
                 if content:
-                    yield f"data: {json.dumps({'content': content})}\n\n"
+                    yield f"data: {json.dumps({'content': content})}\\n\n"
         
         elif variant_stream_id and chunk_id == variant_stream_id:
             if isinstance(data, dict):
@@ -396,7 +391,7 @@ async def _process_stream_response(
                     variant_stream_id = variant_stream_id[2:]
                 content = data.get("curr", "")
                 if content:
-                    yield f"data: {json.dumps({'content': f'[Variant] {content}'})}\n\n"
+                    yield f"data: {json.dumps({'content': f'[Variant] {content}'})}\\n\n"
     
     # End of stream - resolve references and trigger reward flow
     await asyncio.sleep(0.5)
@@ -428,7 +423,7 @@ async def _process_stream_response(
         except Exception as e:
             log_debug(f"Failed to initiate reward flow: {e}")
     
-    yield "data: [DONE]\n\n"
+    yield "data: [DONE]\\n\\n"
 
 
 def _extract_ref_id(value: Any) -> Any:
