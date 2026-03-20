@@ -1,7 +1,7 @@
-"Transport layer for YuppBridge.
+"""Transport layer for YuppBridge.
 
 Contains streaming transport implementation using cloudscraper and Scrapling.
-"
+"""
 
 import asyncio
 import json

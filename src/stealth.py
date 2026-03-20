@@ -7,14 +7,14 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional
 
-from scrapling import StealthCrawler
+from scrapling import Fetcher
 from . import constants
 
 logger = logging.getLogger("yuppbridge.stealth")
 
 class StealthFetcher:
     """
-    Maintains a persistent Patchright browser context to generate Kasada headers.
+    Maintains a persistent browser context to generate Kasada headers.
     """
     def __init__(self):
         self.crawler = None
@@ -26,20 +26,18 @@ class StealthFetcher:
             if self.crawler:
                 return
             
-            logger.info("Initializing StealthFetcher with Patchright...")
+            logger.info("Initializing StealthFetcher with Scrapling...")
             try:
-                # Scrapling with Patchright
-                self.crawler = StealthCrawler(
-                    engine="patchright",
-                    headless=True,
-                    allow_images=False,
-                )
+                # Scrapling Fetcher
+                self.crawler = Fetcher()
                 # Initial page load to trigger Kasada and establish session
                 self.crawler.get(
                     constants.YUPP_BASE_URL,
-                    headers={"User-Agent": constants.DEFAULT_USER_AGENT}
+                    impersonate="chrome",
+                    stealthy_headers=True,
+                    extra_headers={"User-Agent": constants.DEFAULT_USER_AGENT}
                 )
-                logger.info("StealthFetcher initialized successfully with Patchright")
+                logger.info("StealthFetcher initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize StealthFetcher: {e}")
                 self.crawler = None
@@ -88,7 +86,7 @@ class StealthFetcher:
                 response = self.crawler.post(
                     url,
                     json=json_data,
-                    headers=request_headers,
+                    extra_headers=request_headers,
                 )
                 
                 # Check for Kasada failure (often 403)
@@ -96,13 +94,13 @@ class StealthFetcher:
                     logger.warning("Kasada challenge failed (403), refreshing context and retrying...")
                     self.crawler.get(
                         constants.YUPP_BASE_URL,
-                        headers={"User-Agent": constants.DEFAULT_USER_AGENT}
+                        extra_headers={"User-Agent": constants.DEFAULT_USER_AGENT}
                     )
                     # Retry once after refresh
                     response = self.crawler.post(
                         url,
                         json=json_data,
-                        headers=request_headers
+                        extra_headers=request_headers
                     )
 
                 return response

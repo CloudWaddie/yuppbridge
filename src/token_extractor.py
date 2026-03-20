@@ -172,14 +172,14 @@ class TokenExtractor:
                     response = scraper.get(constants.YUPP_CHAT_URL, timeout=10)
                     text = response.text
                 else:
-                    import aiohttp
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(
+                    import httpx
+                    with httpx.Client() as client:
+                        response = client.get(
                             constants.YUPP_CHAT_URL,
                             headers=headers,
-                            timeout=aiohttp.ClientTimeout(total=10),
-                        ) as response:
-                            text = await response.text()
+                            timeout=10,
+                        )
+                        text = response.text
 
             tokens = self._extract_tokens_from_html(text)
             if tokens:
@@ -216,14 +216,14 @@ class TokenExtractor:
                     response = scraper.get(constants.YUPP_BASE_URL, timeout=10)
                     text = response.text
                 else:
-                    import aiohttp
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(
+                    import httpx
+                    with httpx.Client() as client:
+                        response = client.get(
                             constants.YUPP_BASE_URL,
                             headers=headers,
-                            timeout=aiohttp.ClientTimeout(total=10),
-                        ) as response:
-                            text = await response.text()
+                            timeout=10,
+                        )
+                        text = response.text
 
             tokens = self._extract_tokens_from_html(text)
             if tokens:
@@ -238,7 +238,7 @@ class TokenExtractor:
     async def _extract_from_js_bundles(self) -> List[str]:
         """Extract tokens from JavaScript bundles"""
         try:
-            import aiohttp
+            import httpx
 
             # Common Next.js bundle patterns
             bundle_patterns = [
@@ -248,14 +248,14 @@ class TokenExtractor:
 
             headers = self._get_headers()
 
-            async with aiohttp.ClientSession() as session:
+            with httpx.Client() as client:
                 # Try to fetch a page and extract script URLs
-                async with session.get(
+                response = client.get(
                     constants.YUPP_BASE_URL,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as response:
-                    text = await response.text()
+                    timeout=10,
+                )
+                text = response.text
 
                 # Extract script URLs
                 script_urls = re.findall(r'src="([^"]*\.js[^"]*)"', text)
@@ -268,12 +268,12 @@ class TokenExtractor:
                                 if script_url.startswith("http")
                                 else f"{constants.YUPP_BASE_URL}{script_url}"
                             )
-                            async with session.get(
+                            js_response = client.get(
                                 full_url,
                                 headers=headers,
-                                timeout=aiohttp.ClientTimeout(total=5),
-                            ) as js_response:
-                                js_text = await js_response.text()
+                                timeout=5,
+                            )
+                            js_text = js_response.text
 
                             tokens = self._extract_tokens_from_html(js_text)
                             if tokens and len(tokens) >= constants.MIN_REQUIRED_TOKENS:
