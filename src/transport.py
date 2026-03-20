@@ -1,8 +1,7 @@
-"""
-Transport layer for YuppBridge.
+"Transport layer for YuppBridge.
 
 Contains streaming transport implementation using cloudscraper and Scrapling.
-"""
+"
 
 import asyncio
 import json
@@ -265,9 +264,11 @@ async def stream_yupp_chat(
 
 async def _process_stealth_response(response: Any, account: Dict[str, Any], model: str) -> AsyncGenerator[str, None]:
     """Process response from StealthFetcher (Scrapling)."""
-    content = response.content if hasattr(response, 'content') else str(response)
+    content = response.content if hasattr(response, 'content') else response
     if isinstance(content, str):
         content = content.encode()
+    elif not isinstance(content, bytes):
+        content = str(content).encode()
         
     dummy_token_ext = tex.get_token_extractor(jwt_token=account["token"], scraper=None)
     
