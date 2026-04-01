@@ -1,4 +1,4 @@
-# YuppBridge
+# YuppBridge - [Deprecated](https://blog.yupp.ai/winddown)
 
 OpenAI-compatible API bridge to Yupp AI (yupp.ai).
 
